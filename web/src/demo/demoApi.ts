@@ -33,6 +33,7 @@ if (firstRun) {
     entities: { cars: [], energy: {}, lights: [], temps: [], lightGroups: [], buttons: [], climates: [], deviceCards: [], graphs: [] },
   };
   fx.config.secretsSet = [];
+  fx.config.verified = [];
   history.replaceState(null, "", location.pathname);
 }
 
@@ -251,6 +252,34 @@ fx.cars.forEach((c, i) => {
     ],
   };
 });
+// Smart laddning: planen med batterinivå per block och golvkontrollen (50 % kl 06:00), som EnergyWizard publicerar.
+if (d.cars[0]) {
+  const at = (h: number, m: number) => {
+    const t = new Date();
+    t.setDate(t.getDate() + (t.getHours() >= 6 ? 1 : 0));
+    t.setHours(h, m, 0, 0);
+    return t.toISOString();
+  };
+  d.cars[0].smart = {
+    planEntity: "sensor.tesla_model_y_laddplan",
+    modeEntity: "input_select.tesla_model_y_laddlage",
+    state: "Planerad 00:15",
+    mode: "Auto",
+    options: ["Auto", "Ladda nu", "Pausa"],
+    nowOption: "Ladda nu",
+    pauseOption: "Pausa",
+    autoOption: "Auto",
+    slots: [
+      { start: at(0, 15), end: at(0, 30), kw: 6.4, socStart: 30, socEnd: 32 },
+      { start: at(1, 0), end: at(2, 30), kw: 8, socStart: 32, socEnd: 46 },
+      { start: at(5, 30), end: at(6, 0), kw: 6.4, socStart: 46, socEnd: 50 },
+    ],
+    socAfter: 50,
+    plannedKwh: 16.8,
+    morning: { time: "06:00", soc: 50, min: 50, ok: true },
+    source: "EnergyWizard",
+  };
+}
 // ---- Energy today in the demo (a sunny October day with solar and a grid meter) ----
 if (d.energy) {
   d.energy.selfUseKw = Math.min(d.energy.solarKw ?? 0, d.energy.houseKw ?? 0);
@@ -463,7 +492,9 @@ const providerTest = (i: Integration): TestResult => {
       return { ok: true, preview: ["Tis 20 okt · Matavfall", "Tis 3 nov · Matavfall"] };
     case "willys":
     case "hemkop":
-      return { ok: true, message: `Inloggad hos ${i.provider === "willys" ? "Willys" : "Hemköp"} (demo).` };
+    case "ica":
+    case "citygross":
+      return { ok: true, message: `Inloggad hos ${{ willys: "Willys", hemkop: "Hemköp", ica: "ICA", citygross: "City Gross" }[i.provider]} (demo).` };
     case "spot":
       return { ok: true, preview: [`24 timmar · lägst 0,10 kr · högst 1,35 kr (spot) · ${i.settings.area ?? "SE3"}`] };
     default:
@@ -494,6 +525,8 @@ const DEMO_STATIONS: { id: string; name: string; url: string; group: "sr" | "oth
   })),
 ];
 
+const demoTested = new Set<string>();
+
 export const demoApi = {
   config: () => wait(fx.config),
   saveConfig: (config: Config, _secrets: Record<string, string | null> = {}) => {
@@ -501,8 +534,16 @@ export const demoApi = {
     d.home = config.dashboard.home;
     d.tabs = config.dashboard.tabs;
     d.theme = config.dashboard.theme;
+    // In the demo every kept connection counts as signed in once it has been tested.
+    fx.config.verified = config.integrations.filter((i) => demoTested.has(i.id + i.provider)).map((i) => i.id);
     return wait(fx.config, 300);
   },
+  providerStores: () => wait([{ value: "1", label: "Demobutiken Centrum" }, { value: "2", label: "Demobutiken Norr" }]),
+  foodStores: () => wait([] as never[]),
+  foodPart: () => wait({}),
+  foodChoices: () => wait({ options: [], value: "" }),
+  foodSetStore: () => wait({ ok: true }),
+  foodIcaStrike: () => wait({ ok: true }),
   checkPin: () => wait({ ok: true }),
   authStatus: () => wait({ paired: true, pinRequired: false, supervisor: false }),
   backup: (_password?: string) => wait({ app: "familjetavla", version: "demo", created: new Date().toISOString(), config: fx.config.config, local: {} } as unknown, 200),
@@ -549,7 +590,11 @@ export const demoApi = {
     return wait(d, 120);
   },
 
-  testProvider: (integration: Integration, _secrets: Record<string, string>) => wait(providerTest(integration), 700),
+  testProvider: (integration: Integration, _secrets: Record<string, string>) => {
+    const r = providerTest(integration);
+    if (r.ok && !r.choices) demoTested.add(integration.id + integration.provider);
+    return wait(r, 700);
+  },
   testHa: (_url?: string, _token?: string) => wait<TestResult>({ ok: true, message: "Ansluten – 40 entiteter (demo)." }, 500),
   entities: (domains: string[]) => wait(fx.entities.filter((e) => !domains.length || domains.includes(e.entityId.split(".")[0]))),
   testCalendar: (body: { include?: string[]; exclude?: string[] }) => {
@@ -756,7 +801,7 @@ export const demoApi = {
         { name: "RIX FM", url: "https://fm01-ice.stream.khz.se/fm01_mp3", country: "SE", quality: "MP3 128 kbit/s" },
       ].filter((x) => x.name.toLowerCase().includes(q.toLowerCase().slice(0, 2))),
     }),
-  addItem: (name: string) => {
+  addItem: (name: string, _offer?: { store: string; id: string }) => {
     d.shopping.items.push({ id: String(Date.now()), name, done: false });
     return wait({});
   },
